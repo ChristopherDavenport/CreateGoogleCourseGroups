@@ -1,3 +1,4 @@
+enablePlugins(JavaAppPackaging)
 name := "CreateGoogleCourseGroups"
 
 version := "1.0"
@@ -18,3 +19,9 @@ libraryDependencies ++= List(
 )
 
 unmanagedBase := baseDirectory.value / ".lib"
+
+mainClass in Compile := Some("edu.eckerd.scripts.google.CreateGoogleCourseGroups")
+
+mappings in Universal += {
+  sourceDirectory.value / "main" / "resources" / "application.conf" -> "conf/application.conf"
+}
