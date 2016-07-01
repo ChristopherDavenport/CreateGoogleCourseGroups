@@ -1,6 +1,7 @@
 package edu.eckerd.scripts.google.methods
 
 import com.google.api.client.googleapis.json.GoogleJsonResponseException
+import com.typesafe.scalalogging.LazyLogging
 import edu.eckerd.google.api.services.directory.Directory
 import edu.eckerd.google.api.services.directory.models.Group
 import edu.eckerd.google.api.services.directory.models.Member
@@ -15,7 +16,7 @@ import concurrent.{ExecutionContext, Future}
 /**
   * Created by davenpcm on 6/30/16.
   */
-trait CreateGoogleCourseGroupsMethods {
+trait CreateGoogleCourseGroupsMethods extends LazyLogging{
   val profile : slick.driver.JdbcProfile
   import profile.api._
 
@@ -128,18 +129,22 @@ ORDER BY alias asc
                                                 directory: Directory,
                                                 ec: ExecutionContext): Future[Seq[(Group, Member, Int)]] = {
     checkIfGroupExists(groupData.group).flatMap{
-      case true => Future.sequence {
-        createMembersOfGroupData(groupData).map(member =>
-          checkIfMemberExists(groupData.group, member).flatMap {
-            case true =>
-              Future.successful((groupData.group, member, 0))
-            case false =>
-              createNonexistentMember(groupData.group, member)
-          }
-        )
-      }
+
+      case true =>
+        Future.sequence {
+          createMembersOfGroupData(groupData).map(member =>
+            checkIfMemberExists(groupData.group, member).flatMap {
+              case true =>
+                Future.successful((groupData.group, member, 0))
+              case false =>
+                createNonexistentMember(groupData.group, member)
+            }
+          )
+        }
+
       case false =>
         createNonExistentGroup(groupData).flatMap(createFromGroupData)
+
     }
   }
 
@@ -163,9 +168,13 @@ ORDER BY alias asc
   private def createGoogleGroup(group: Group)(implicit directory: Directory, ec: ExecutionContext): Future[Group] = Future {
     directory.groups.create(group)
   } recoverWith {
-    case limitCap : GoogleJsonResponseException if limitCap.getLocalizedMessage.contains("exceeds") =>
-      Thread.sleep(1000)
-      createGoogleGroup(group)
+//    case limitCap : GoogleJsonResponseException if limitCap.getLocalizedMessage.contains("exceeds") =>
+//      Thread.sleep(1000)
+//      createGoogleGroup(group)
+    case alreadyExists : GoogleJsonResponseException if alreadyExists.getLocalizedMessage.contains("Entity already exists.") =>
+      val groupExists = directory.groups.get(group).get
+      logger.error(s"Entity Already Exists For $groupExists")
+      Future.successful(groupExists)
   }
 
   private def createGroupInDB(group: Group, term: String)(implicit db: JdbcProfile#Backend#Database, ec: ExecutionContext) : Future[Int] = {
@@ -182,7 +191,7 @@ ORDER BY alias asc
       Some (term)
     )
 
-    db.run(googleGroups += NewGroup)
+    db.run(googleGroups.insertOrUpdate(NewGroup))
   }
 
 
@@ -213,9 +222,12 @@ ORDER BY alias asc
   : Future[Member] = Future {
     directory.members.add(group.email, member)
   } recoverWith {
-    case limitCap : GoogleJsonResponseException if limitCap.getLocalizedMessage.contains("exceeds") =>
-      Thread.sleep(1000)
-      createGoogleMember(group, member)
+//    case limitCap : GoogleJsonResponseException if limitCap.getLocalizedMessage.contains("exceeds") =>
+//      Thread.sleep(1000)
+//      createGoogleMember(group, member)
+    case alreadyExists : GoogleJsonResponseException if alreadyExists.getLocalizedMessage.contains("Entity already exists.") =>
+      logger.error(s"Entity Already Exists For $group - $member")
+      Future.successful(member)
   }
 
   private def checkIfMemberExists(group: Group, member: Member)(implicit db: JdbcProfile#Backend#Database): Future[Boolean] = {

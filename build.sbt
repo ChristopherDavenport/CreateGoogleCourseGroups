@@ -15,7 +15,8 @@ libraryDependencies ++= List(
   "com.typesafe.slick" %% "slick" % slickV,
   "com.typesafe.slick" %% "slick-extensions" % slickV ,
   "com.typesafe.slick" %% "slick-hikaricp" % slickV,
-  "com.typesafe.scala-logging" %% "scala-logging" % "3.4.0"
+  "com.typesafe.scala-logging" %% "scala-logging" % "3.4.0",
+  "ch.qos.logback" % "logback-classic" % "1.1.3"
 )
 
 unmanagedBase := baseDirectory.value / ".lib"
