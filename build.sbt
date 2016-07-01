@@ -13,7 +13,8 @@ libraryDependencies ++= List(
   "edu.eckerd" %% "google-api-scala" % "0.0.1-SNAPSHOT",
   "com.typesafe.slick" %% "slick" % slickV,
   "com.typesafe.slick" %% "slick-extensions" % slickV ,
-  "com.typesafe.slick" %% "slick-hikaricp" % slickV
+  "com.typesafe.slick" %% "slick-hikaricp" % slickV,
+  "com.typesafe.scala-logging" %% "scala-logging" % "3.4.0"
 )
 
 unmanagedBase := baseDirectory.value / ".lib"
