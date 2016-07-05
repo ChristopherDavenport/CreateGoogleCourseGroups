@@ -23,7 +23,7 @@ object CreateGoogleCourseGroups extends CreateGoogleCourseGroupsMethods with Goo
 
   val result = Await.result(creating, Duration.Inf)
 
-  result.flatMap(_.filter(_._3 > 0)).foreach(r => logger.info(s"$r"))
+  result.filter(_._3 > 0).foreach(r => logger.info(s"$r"))
 
   logger.info("Exiting Create Google Groups Process Normally")
 }

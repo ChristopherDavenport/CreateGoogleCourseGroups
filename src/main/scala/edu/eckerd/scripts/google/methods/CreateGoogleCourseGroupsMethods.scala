@@ -21,14 +21,74 @@ trait CreateGoogleCourseGroupsMethods extends LazyLogging{
   val profile : slick.driver.JdbcProfile
   import profile.api._
 
+  /**
+    * The primary Method and only public method exposed by these sets of Methods.
+    * It generates the correct set of google groups.
+    *
+    * Below is a chart of application flow
+    *
+    * CreateGoogleCourseGroup
+    * |
+    * |
+    * V
+    * getTermGroupInformationFromDatabase
+    * |
+    * |               /PartitionByGroup
+    * V              / TransformToGroups
+    * createGroupData
+    * |
+    * |
+    * V
+    * createFromGroupData
+    * |
+    * |                   <----- createGroupInDB ------
+    * V                 /                              \
+    * checkIfGroupExists                                createGoogleGroup
+    * |                 \ No                           /
+    * |                  ------->createNonExistentGroup
+    * |Yes
+    * V
+    * createMembersFromGroupData
+    * |                   \ transformProfessorToMember
+    * |                    \ transformStudentsToMembers
+    * V
+    * checkIfMemberExists
+    * |                  \ Yes
+    * |No                 ------------------> Successful(Group, Member, 0)
+    * V
+    * createNonExistentMember
+    * |
+    * |
+    * V
+    * createGoogleMember
+    * |
+    * |
+    * V
+    * createMemberInDB
+    * |
+    * |
+    * |
+    * --------------------------------------> Successful(Group, Member, 1)
+    *
+    *
+    * @param db The database to be used to update these groups - This needs to have a full install of Banner Student
+    *           in order for all of the appropriate tables for the SQL query to be in place
+    * @param directory The google Directory object
+    * @param ec An execution context so that it can split futures as neccessary
+    * @return A Future set of Group, Member, and Int representing the group the member is a part of and the number
+    *         of rows affected by this run.
+    */
   def CreateGoogleCourseGroups()(implicit db: JdbcProfile#Backend#Database,
                                  directory: Directory,
-                                 ec: ExecutionContext): Future[Seq[Seq[(Group, Member, Int)]]] = {
+                                 ec: ExecutionContext): Future[Seq[(Group, Member, Int)]] = {
     for {
       classGroupMembers <- getTermGroupInformationFromDatabase
       groupData = createGroupData(classGroupMembers)
       result <- Future.traverse(groupData)(createFromGroupData)
-    } yield result
+    } yield for {
+      seq <- result
+      flat <- seq
+    } yield flat
   }
 
   private case class ClassGroupMember(
@@ -41,12 +101,94 @@ trait CreateGoogleCourseGroupsMethods extends LazyLogging{
 
   private case class GroupData(group: Group, classGroupMembers : Seq[ClassGroupMember])
 
+  /**
+    * This Class is Similar To a Group Except that rather than Options, it Contains All Required Values To Go
+    * Into the Table. This is very useful because it allows us to make sure explicitly all the correct information is
+    * present at Compile Time Rather than at Runtime.
+    *
+    * On further advancements to the Google API perhaps this will not be necessary.
+    *
+    */
+  private case class CompleteGroup(
+                                    Name: String,
+                                    Email: String,
+                                    Id: String,
+                                    Description: Option[String],
+                                    MemberCount: Long,
+                                    AdminCreated: Boolean
+                                  )
+  private def fromCompleteGroupToGroup(completeGroup: CompleteGroup): Group = {
+    Group(
+      completeGroup.Name,
+      completeGroup.Email,
+      Some(completeGroup.Id),
+      completeGroup.Description,
+      Some(completeGroup.MemberCount),
+      None,
+      Some(completeGroup.AdminCreated)
+    )
+  }
+  private def fromGroupToCompleteGroup(group: Group): CompleteGroup = {
+    CompleteGroup(
+      group.name,
+      group.email,
+      group.id.get,
+      group.description,
+      group.directMemberCount.get,
+      group.adminCreated.get
+    )
+  }
+
   private implicit val getClassGroupMemberResult = GetResult(r => ClassGroupMember(r.<<, r.<<, r.<<, r.<<, r.<<))
 
-
+  /**
+    * The cornerstone of this operation hinges around an effective query to return the necessary rows.
+    *
+    * Important Information
+    *
+    * GTVSDAX -
+    * The Internal Code 'ECTERM' and the
+    * Internal Code Group 'ALIAS_UP', 'ALIAS_UP_XCRS', 'ALIAS_UR', 'ALIAS_UR_XCRS'
+    * These values must be advanced in Banner for new Terms to be created.
+    *
+    * SSBSECT -
+    * Students Must Be Enrolled In The Course
+    *
+    * SIRASGN -
+    * The course must have a Primary Professor
+    *
+    * STVRSTS -
+    * Student Must Be included in enrollment and not withdrawn in order to be built
+    *
+    * GOREMAL -
+    * Student Email must be type 'CAS'
+    * Professor Email must be of type 'CA'
+    *
+    * Takes the Max Effective Term And Generates
+    *
+    * COURSE_TITLE - SSBSECT_CRSE_TITLE or if not present SCBCRSE_TITLE
+    *
+    * ALIAS -
+    * IMPORTANT -
+    * A Lowercase Email Address - If this is not lowered when google returns the information it will be in
+    * a different format than what was given to google. Emails entered to google should always be lowercase.
+    * Example(
+    *           es || 499 || - || 1 || - || fa || @eckerd.edu
+    *         )
+    *
+    * STUDENT_EMAIL - address from GOREMAL
+    *
+    * PROFESSOR_EMAIL -  Address from GOREMAL
+    *
+    * GTVSDAX_EXTERNAL_CODE - This corresponds to the Term Code that the Group was built and will be used to automate
+    * any other actions against groups of this term, such as deletion at a later date.
+    *
+    *
+    * @param db The database needed to execute this query - Also important in the implicit val for getResult above that
+    *           implicitly converts the tuples that are natively returned into the appropriate ClassGroupMember
+    * @return A Sequence of ClassGroup Memebers To Be Used To Generate Groups
+    */
   private def getTermGroupInformationFromDatabase(implicit db: Database): Future[Seq[ClassGroupMember]] = {
-
-
     val data = sql"""
   SELECT
   nvl(SSBSECT_CRSE_TITLE, x.SCBCRSE_TITLE) as COURSE_TITLE,
@@ -100,7 +242,31 @@ ORDER BY alias asc
     db.run(data)
   }
 
+  /**
+    * This function takes the information returned from the database and manipulates it into a GroupData type which
+    * can be used to generate the groups and members as opposed to dealing with the information in mass
+    *
+    * After this transformation the original Data is irrelevant and is no longer used. GroupData is used from this
+    * point forward.
+    *
+    * @param allMembersForCurrentTerms This is the set of information returned from the database
+    * @return A group data object
+    */
+  private def createGroupData(allMembersForCurrentTerms: Seq[ClassGroupMember]): Seq[GroupData] = {
+    val mapOfMembersByGroup = partitionByGroup(allMembersForCurrentTerms)
 
+    for {
+      group <- transformToGroups(allMembersForCurrentTerms)
+    } yield {
+      GroupData(group, mapOfMembersByGroup.get(group.email).get)
+    }
+  }
+
+  /**
+    * This is a simple splitter function by creating groups and deleting any duplicates.
+    * @param allMembersForCurrentTerms The set of all records returned from the database
+    * @return  A Sequence of Unique Groups
+    */
   private def transformToGroups(allMembersForCurrentTerms: Seq[ClassGroupMember]):Seq[Group] = {
     val groups = for {
       member <- allMembersForCurrentTerms
@@ -112,21 +278,40 @@ ORDER BY alias asc
     groups.distinct
   }
 
+  /**
+    * This partitions the groups into a Map so that the courseEmail can be used to extract all the Members
+    * of a particular group in constant time. So it is in N time with regards to the amount of Unique Groups
+    *
+    * @param allMembersForCurrentTerms The set of all records returned from the database
+    * @return A Map connecting courseEmail to all Members of that course.
+    */
   private def partitionByGroup(allMembersForCurrentTerms: Seq[ClassGroupMember]): Map[String, Seq[ClassGroupMember]]= {
     allMembersForCurrentTerms.groupBy(_.courseEmail)
   }
 
-  private def createGroupData(allMembersForCurrentTerms: Seq[ClassGroupMember]): Seq[GroupData] = {
-    val mapOfMembersByGroup = partitionByGroup(allMembersForCurrentTerms)
 
-    for {
-      group <- transformToGroups(allMembersForCurrentTerms)
-    } yield {
-      GroupData(group, mapOfMembersByGroup.get(group.email).get)
-    }
-  }
-
-
+  /**
+    * This is the core function where splitting down the two paths operates and allows us
+    * to never communicate with google unless we need to create the group.
+    *
+    * First it checks if the group exists
+    *
+    * If if does not -
+    * It creates the group in Google,
+    * creates the group in the Database
+    * and then returns to this function
+    *
+    * If it does -
+    * We use the returned group to check if Members Exists
+    *   If the Member Exists We Return Succesfully Completed
+    *   If the Member Does Not Exist We Create It in Google and Then Create it in the Database
+    *
+    * @param groupData A groupData which contains group information and all members
+    * @param db The database to perform this on
+    * @param directory The directory to check against Google
+    * @param ec The execution context to perform this on
+    * @return A Future of Sequence of Group, Member, Int - Which is the return of the entire operation
+    */
   private def createFromGroupData(groupData: GroupData)(implicit db: JdbcProfile#Backend#Database,
                                                 directory: Directory,
                                                 ec: ExecutionContext): Future[Seq[(Group, Member, Int)]] = {
@@ -138,7 +323,7 @@ ORDER BY alias asc
           createMembersOfGroupData(groupData).map(member =>
             checkIfMemberExists(groupOption, member).flatMap {
               case Some(memberRowGroupRowTuple) =>
-                logger.debug(s"$groupOption - $member - exist - doing nothing")
+                logger.debug(s"$groupOption - $member exists - doing nothing")
                 Future.successful(( fromCompleteGroupToGroup(groupOption), member, 0))
               case None =>
                 logger.debug(s"$groupOption - $member - does not exist - creating member")
@@ -154,19 +339,30 @@ ORDER BY alias asc
     }
   }
 
-
-  private def createNonExistentGroup(groupData: GroupData)
-                            (implicit db: JdbcProfile#Backend#Database,
-                             directory: Directory,
-                             ec: ExecutionContext): Future[GroupData] = {
-    val term = groupData.classGroupMembers.head.term
-    for {
-      group <- createGoogleGroup(groupData.group)
-      intCreated <- createGroupInDB(group, term)
-    } yield groupData.copy(group = group)
-  }
-
+  /**
+    * This is the check function to make sure the group exists. It checks the email against the email in the
+    * GOOGLE_GROUPS table and  if they match converts them ta a CompleteGroup which will be used For the Members
+    * Joing
+    *
+    * @param group The group to check if exists
+    * @param db The database to check against
+    * @param ec The execution context to perform it in
+    * @return An option of a Complete Group or None
+    */
   private def checkIfGroupExists(group: Group)(implicit db: JdbcProfile#Backend#Database, ec: ExecutionContext): Future[Option[CompleteGroup]] = {
+
+    def convertGroupRowToCompleteGroup(googleGroupsRow: GoogleGroupsRow): CompleteGroup = {
+      val adminCreated = true
+      CompleteGroup(
+        googleGroupsRow.name,
+        googleGroupsRow.email,
+        googleGroupsRow.id,
+        googleGroupsRow.desc,
+        googleGroupsRow.count,
+        adminCreated
+      )
+    }
+
     val action = googleGroups.filter(g =>
       g.email === group.email
     ).result.headOption
@@ -177,18 +373,46 @@ ORDER BY alias asc
     }
   }
 
-  private def convertGroupRowToCompleteGroup(googleGroupsRow: GoogleGroupsRow): CompleteGroup = {
-    val adminCreated = true
-    CompleteGroup(
-      googleGroupsRow.name,
-      googleGroupsRow.email,
-      googleGroupsRow.id,
-      googleGroupsRow.desc,
-      googleGroupsRow.count,
-      adminCreated
-    )
+  /**
+    * This function first determines the term from the Group Members records,
+    * then creates the group in Google,
+    * then creates the Group in the database with the term listed by the Group Members
+    *
+    * This returns a GroupData only after having converted to a CompleteGroup so It can be guaranteed that
+    * the groups in the creation Process will be complete
+    *
+    * @param groupData The GroupData
+    * @param db The database to perform this one
+    * @param directory The directory to manipulate Google
+    * @param ec The execution context to perform this one
+    * @return A GroupData Object with a group that has the requirements to be a CompleteGroup
+    */
+  private def createNonExistentGroup(groupData: GroupData)
+                            (implicit db: JdbcProfile#Backend#Database,
+                             directory: Directory,
+                             ec: ExecutionContext): Future[GroupData] = {
+    val term = groupData.classGroupMembers.head.term
+    for {
+      group <- createGoogleGroup(groupData.group)
+      intCreated <- createGroupInDB( fromGroupToCompleteGroup(group) , term)
+    } yield groupData.copy(group = group)
   }
 
+  /**
+    * This creates the group in Google using the Directory and Execution Context Provided.
+    * Error Handling is in place for common errors.
+    * limitCap - There is not an amazing way to deal with the rateLimit on Google, so it is deal with explicitly. It
+    * goes to sleep... I know it is horrifying, however I am open to suggestion.
+    * alreadyExists - If we got here something went wrong. Primarily in the process of creating a group this program
+    * must have been stopped before it updated the Database. No fear however - We can go and retrieve that information
+    * from google to recover. If it doesnt exists that is very worrisome. And it is the appropriate time the throw an
+    * error
+    *
+    * @param group The group to create
+    * @param directory The directory to create it in
+    * @param ec The execution context to branch executors from
+    * @return The Group after it has been created
+    */
   private def createGoogleGroup(group: Group)(implicit directory: Directory, ec: ExecutionContext): Future[Group] = Future {
     directory.groups.create(group)
   } recoverWith {
@@ -196,13 +420,35 @@ ORDER BY alias asc
       Thread.sleep(100)
       createGoogleGroup(group)
     case alreadyExists : GoogleJsonResponseException if alreadyExists.getLocalizedMessage.contains("already exists") =>
-      logger.error(s"Group Already Exists For $group")
-      Future.failed(alreadyExists)
+      val tryRecoverGroup = Try(directory.groups.get(group.email).get)
+      if (tryRecoverGroup.isFailure) {
+        logger.error(s"Group Already Exists For $group")
+        Future.failed(alreadyExists)
+      } else {
+        Future.successful(tryRecoverGroup.get)
+      }
   }
 
+  /**
+    * By using CompleteGroups we have type safety that the information is all present when it reaches this function.
+    * This writes groups to the Database
+    *
+    *
+    * Auto_Indicator = Y
+    * Auto_Type = COURSE
+    * Auto_Key = email without the address, kept for legace purposes
+    * Auto_Term_Code = The Term That this Course is For
+    *
+    * @param group The Group To Create
+    * @param term The term the group is for
+    * @param db The Database to Write this to
+    * @param ec The execution Context to for executors from
+    * @return An integer representing the Number of Rows Affected.
+    *         This result is ignored in the execution of this program
+    */
   private def createGroupInDB(group: CompleteGroup, term: String)(implicit db: JdbcProfile#Backend#Database, ec: ExecutionContext) : Future[Int] = {
 
-    val NewGroup = Try{GoogleGroupsRow(
+    val NewGroup = GoogleGroupsRow(
       group.Id,
       "Y",
       group.Name,
@@ -211,25 +457,55 @@ ORDER BY alias asc
       group.Description,
       None,
       Some ("COURSE"),
-      Some (group.email.replace ("@eckerd.edu", "") ),
+      Some (group.Email.replace ("@eckerd.edu", "") ),
       Some (term)
-    )}
+    )
 
-    if (NewGroup.isFailure){
-      logger.error(s"Failed to create $group in DB")
-      Future.failed(NewGroup.failed.get)
-    } else{
-      logger.debug(s"Creating or Updating - $NewGroup")
-      db.run(googleGroups.insertOrUpdate(NewGroup.get))
-    }
-
+    logger.debug(s"Creating or Updating - $NewGroup")
+    db.run(googleGroups.insertOrUpdate(NewGroup))
   }
 
+  /**
+    * Creates Members from both the Professor and the Students of the Group. The Two helper function explain why
+    * each decision was made.
+    * @param groupData The groupData to build the members from
+    * @return A Sequence of Members to Iterate Over
+    */
+  private def createMembersOfGroupData(groupData: GroupData): Seq[Member] = {
+    transformStudentsToMembers(groupData) ++ Seq[Member](transformProfessorToMember(groupData))
+  }
 
+  private def transformProfessorToMember(groupData: GroupData): Member = {
+    val professorEmail = groupData.classGroupMembers.head.professorEmail
+    Member(
+      email = Some(professorEmail),
+      role = "OWNER"
+    )
+  }
 
-  private def createNonexistentMember(group: CompleteGroup, member: Member)(implicit db: JdbcProfile#Backend#Database,
-                                                            directory: Directory,
-                                                            ec: ExecutionContext): Future[(CompleteGroup, Member, Int)] = {
+  private def transformStudentsToMembers(groupData: GroupData): Seq[Member]
+  = {
+    for {
+      member <- groupData.classGroupMembers
+    } yield Member(Some(member.studentEmail))
+  }
+
+  private def checkIfMemberExists(group: CompleteGroup, member: Member)(implicit db: JdbcProfile#Backend#Database): Future[Option[(GoogleGroupToUserRow, GoogleGroupsRow)]] = {
+
+    val memberFilter = googleGroupToUser.filter(_.userEmail === member.email)
+    val groupFilter = googleGroups.filter(_.email === group.Email)
+
+    val tableJoin = memberFilter join groupFilter on (_.groupId === _.id)
+    val action = tableJoin.result.headOption
+
+    val f = db.run(action)
+    f
+  }
+
+  private def createNonexistentMember(group: CompleteGroup, member: Member)
+                                     (implicit db: JdbcProfile#Backend#Database,
+                                      directory: Directory,
+                                      ec: ExecutionContext): Future[(CompleteGroup, Member, Int)] = {
     for {
       googleMember <- createGoogleMember(group, member)
       created <- createMemberInDB(group, googleMember)
@@ -255,8 +531,9 @@ ORDER BY alias asc
       db.run(googleGroupToUser += NewMember.get)
     }
 
-
   }
+
+
 
   private def createGoogleMember(group: CompleteGroup, member: Member)(implicit directory: Directory, ec: ExecutionContext)
   : Future[Member] = Future {
@@ -271,70 +548,6 @@ ORDER BY alias asc
 
       Future{ Member(member.email, user.right.get.id, member.memberType, member.role) }
   }
-
-  private def checkIfMemberExists(group: CompleteGroup, member: Member)(implicit db: JdbcProfile#Backend#Database): Future[Option[(GoogleGroupToUserRow, GoogleGroupsRow)]] = {
-
-    val memberFilter = googleGroupToUser.filter(_.userEmail === member.email)
-    val groupFilter = googleGroups.filter(_.email === group.email)
-
-    val tableJoin = memberFilter join groupFilter on (_.groupId === _.id)
-    val action = tableJoin.result.headOption
-
-    val f = db.run(action)
-    f
-  }
-
-  private def createMembersOfGroupData(groupData: GroupData): Seq[Member] = {
-    transformStudentsToMembers(groupData) ++ Seq[Member](transformProfessorToMember(groupData))
-  }
-
-  private def transformProfessorToMember(groupData: GroupData): Member = {
-    val professorEmail = groupData.classGroupMembers.head.professorEmail
-    Member(
-      email = Some(professorEmail),
-      role = "OWNER"
-    )
-  }
-
-  private def transformStudentsToMembers(groupData: GroupData): Seq[Member]
-  = {
-    for {
-      member <- groupData.classGroupMembers
-    } yield Member(Some(member.studentEmail))
-  }
-
-  private case class CompleteGroup(
-                                  Name: String,
-                                  Email: String,
-                                  Id: String,
-                                  Description: Option[String],
-                                  MemberCount: Long,
-                                  AdminCreated: Boolean
-                                  )
-
-  private implicit def fromCompleteGroupToGroup(completeGroup: CompleteGroup): Group = {
-    Group(
-      completeGroup.Name,
-      completeGroup.Email,
-      Some(completeGroup.Id),
-      completeGroup.Description,
-      Some(completeGroup.MemberCount),
-      None,
-      Some(completeGroup.AdminCreated)
-    )
-  }
-
-  private implicit def fromGroupToCompleteGroup(group: Group): CompleteGroup = {
-    CompleteGroup(
-      group.name,
-      group.email,
-      group.id.get,
-      group.description,
-      group.directMemberCount.get,
-      group.adminCreated.get
-    )
-  }
-
 
 
 
