@@ -29,7 +29,7 @@
     <logger name="slick.relational" level="error" />
     <logger name="slick.compiler" level="error" />
     <logger name="com.typesafe" level ="error" />
-    <logger name="edu.eckerd" level="debug" />
+    <logger name="edu.eckerd" level="info" />
     <logger name="com.zaxxer.hikari" level="error" />
     <!-- Configure so that it outputs to both console and log file -->
     <root level="info">

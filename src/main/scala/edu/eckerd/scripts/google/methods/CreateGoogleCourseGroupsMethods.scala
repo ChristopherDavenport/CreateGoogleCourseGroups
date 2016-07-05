@@ -11,8 +11,9 @@ import edu.eckerd.scripts.google.persistence.GoogleTables.googleGroupToUser
 import edu.eckerd.scripts.google.persistence.GoogleTables.GoogleGroupsRow
 import edu.eckerd.scripts.google.persistence.GoogleTables.GoogleGroupToUserRow
 import slick.jdbc.GetResult
-
+import language.implicitConversions
 import concurrent.{ExecutionContext, Future}
+import scala.util.Try
 /**
   * Created by davenpcm on 6/30/16.
   */
@@ -49,8 +50,8 @@ trait CreateGoogleCourseGroupsMethods extends LazyLogging{
     val data = sql"""
   SELECT
   nvl(SSBSECT_CRSE_TITLE, x.SCBCRSE_TITLE) as COURSE_TITLE,
-  lower(SSBSECT_SUBJ_CODE) || SSBSECT_CRSE_NUMB || '-' || TO_CHAR(TO_NUMBER(SSBSECT_SEQ_NUMB)) ||
-  '-' || decode(substr(SFRSTCR_TERM_CODE, -2, 1), 1, 'fa', 2, 'sp', 3, 'su') || '@eckerd.edu' as ALIAS,
+  lower(SSBSECT_SUBJ_CODE || SSBSECT_CRSE_NUMB || '-' || TO_CHAR(TO_NUMBER(SSBSECT_SEQ_NUMB)) ||
+  '-' || decode(substr(SFRSTCR_TERM_CODE, -2, 1), 1, 'fa', 2, 'sp', 3, 'su') || '@eckerd.edu') as ALIAS,
   studentemail.GOREMAL_EMAIL_ADDRESS as STUDENT_EMAIL,
   professorEmail.GOREMAL_EMAIL_ADDRESS as PROFESSOR_EMAIL,
   GTVSDAX_EXTERNAL_CODE
@@ -125,24 +126,29 @@ ORDER BY alias asc
     }
   }
 
+
   private def createFromGroupData(groupData: GroupData)(implicit db: JdbcProfile#Backend#Database,
                                                 directory: Directory,
                                                 ec: ExecutionContext): Future[Seq[(Group, Member, Int)]] = {
     checkIfGroupExists(groupData.group).flatMap{
 
-      case true =>
+      case Some(groupOption) =>
+        logger.debug(s"$groupOption exists - continuing to check members")
         Future.sequence {
           createMembersOfGroupData(groupData).map(member =>
-            checkIfMemberExists(groupData.group, member).flatMap {
-              case true =>
-                Future.successful((groupData.group, member, 0))
-              case false =>
-                createNonexistentMember(groupData.group, member)
+            checkIfMemberExists(groupOption, member).flatMap {
+              case Some(memberRowGroupRowTuple) =>
+                logger.debug(s"$groupOption - $member - exist - doing nothing")
+                Future.successful(( fromCompleteGroupToGroup(groupOption), member, 0))
+              case None =>
+                logger.debug(s"$groupOption - $member - does not exist - creating member")
+                createNonexistentMember(groupOption, member).map(tuple => ( fromCompleteGroupToGroup(tuple._1), tuple._2, tuple._3))
             }
           )
         }
 
-      case false =>
+      case None =>
+        logger.debug(s"${groupData.group} does not exist - creating group")
         createNonExistentGroup(groupData).flatMap(createFromGroupData)
 
     }
@@ -160,45 +166,70 @@ ORDER BY alias asc
     } yield groupData.copy(group = group)
   }
 
-  private def checkIfGroupExists(group: Group)(implicit db: JdbcProfile#Backend#Database, ec: ExecutionContext): Future[Boolean] = {
-    val action = googleGroups.withFilter(_.email === group.email).exists.result
-    db.run(action)
+  private def checkIfGroupExists(group: Group)(implicit db: JdbcProfile#Backend#Database, ec: ExecutionContext): Future[Option[CompleteGroup]] = {
+    val action = googleGroups.filter(g =>
+      g.email === group.email
+    ).result.headOption
+
+    db.run(action).map{
+      case None => None
+      case Some(groupInTable) => Some(convertGroupRowToCompleteGroup(groupInTable))
+    }
+  }
+
+  private def convertGroupRowToCompleteGroup(googleGroupsRow: GoogleGroupsRow): CompleteGroup = {
+    val adminCreated = true
+    CompleteGroup(
+      googleGroupsRow.name,
+      googleGroupsRow.email,
+      googleGroupsRow.id,
+      googleGroupsRow.desc,
+      googleGroupsRow.count,
+      adminCreated
+    )
   }
 
   private def createGoogleGroup(group: Group)(implicit directory: Directory, ec: ExecutionContext): Future[Group] = Future {
     directory.groups.create(group)
   } recoverWith {
-//    case limitCap : GoogleJsonResponseException if limitCap.getLocalizedMessage.contains("exceeds") =>
-//      Thread.sleep(1000)
-//      createGoogleGroup(group)
-    case alreadyExists : GoogleJsonResponseException if alreadyExists.getLocalizedMessage.contains("Entity already exists.") =>
-      val groupExists = directory.groups.get(group).get
-      logger.error(s"Entity Already Exists For $groupExists")
-      Future.successful(groupExists)
+    case limitCap : GoogleJsonResponseException if limitCap.getLocalizedMessage.contains("exceeds") =>
+      Thread.sleep(100)
+      createGoogleGroup(group)
+    case alreadyExists : GoogleJsonResponseException if alreadyExists.getLocalizedMessage.contains("already exists") =>
+      logger.error(s"Group Already Exists For $group")
+      Future.failed(alreadyExists)
   }
 
-  private def createGroupInDB(group: Group, term: String)(implicit db: JdbcProfile#Backend#Database, ec: ExecutionContext) : Future[Int] = {
-    val NewGroup = GoogleGroupsRow(
-      group.id.get,
+  private def createGroupInDB(group: CompleteGroup, term: String)(implicit db: JdbcProfile#Backend#Database, ec: ExecutionContext) : Future[Int] = {
+
+    val NewGroup = Try{GoogleGroupsRow(
+      group.Id,
       "Y",
-      group.name,
-      group.email,
-      group.directMemberCount.getOrElse(0),
-      group.description,
+      group.Name,
+      group.Email,
+      group.MemberCount,
+      group.Description,
       None,
       Some ("COURSE"),
       Some (group.email.replace ("@eckerd.edu", "") ),
       Some (term)
-    )
+    )}
 
-    db.run(googleGroups.insertOrUpdate(NewGroup))
+    if (NewGroup.isFailure){
+      logger.error(s"Failed to create $group in DB")
+      Future.failed(NewGroup.failed.get)
+    } else{
+      logger.debug(s"Creating or Updating - $NewGroup")
+      db.run(googleGroups.insertOrUpdate(NewGroup.get))
+    }
+
   }
 
 
 
-  private def createNonexistentMember(group: Group, member: Member)(implicit db: JdbcProfile#Backend#Database,
+  private def createNonexistentMember(group: CompleteGroup, member: Member)(implicit db: JdbcProfile#Backend#Database,
                                                             directory: Directory,
-                                                            ec: ExecutionContext): Future[(Group, Member, Int)] = {
+                                                            ec: ExecutionContext): Future[(CompleteGroup, Member, Int)] = {
     for {
       googleMember <- createGoogleMember(group, member)
       created <- createMemberInDB(group, googleMember)
@@ -206,41 +237,52 @@ ORDER BY alias asc
 
   }
 
-  private def createMemberInDB(group: Group, member: Member)(implicit db: JdbcProfile#Backend#Database, ec: ExecutionContext): Future[Int] = {
-    val NewMember = GoogleGroupToUserRow(
-      group.id.get,
+  private def createMemberInDB(group: CompleteGroup, member: Member)(implicit db: JdbcProfile#Backend#Database, ec: ExecutionContext): Future[Int] = {
+    val NewMember = Try{GoogleGroupToUserRow(
+      group.Id,
       member.id.get,
       member.email,
       "Y",
       member.role,
       member.memberType
     )
-    db.run(googleGroupToUser += NewMember)
+    }
+    if (NewMember.isFailure){
+      logger.error(s"Failed to create $group in DB")
+      Future.failed(NewMember.failed.get)
+    } else{
+      logger.debug(s"Creating or Updating - $NewMember")
+      db.run(googleGroupToUser += NewMember.get)
+    }
+
+
   }
 
-  private def createGoogleMember(group: Group, member: Member)(implicit directory: Directory, ec: ExecutionContext)
+  private def createGoogleMember(group: CompleteGroup, member: Member)(implicit directory: Directory, ec: ExecutionContext)
   : Future[Member] = Future {
-    directory.members.add(group.email, member)
+    directory.members.add(group.Email, member)
   } recoverWith {
-//    case limitCap : GoogleJsonResponseException if limitCap.getLocalizedMessage.contains("exceeds") =>
-//      Thread.sleep(1000)
-//      createGoogleMember(group, member)
-    case alreadyExists : GoogleJsonResponseException if alreadyExists.getLocalizedMessage.contains("Entity already exists.") =>
-      logger.error(s"Entity Already Exists For $group - $member")
-      Future.successful(member)
+    case limitCap : GoogleJsonResponseException if limitCap.getLocalizedMessage.contains("exceeds") =>
+      Thread.sleep(100)
+      createGoogleMember(group, member)
+    case alreadyExists : GoogleJsonResponseException if alreadyExists.getLocalizedMessage.contains("already exists") =>
+      logger.error(s"Member Already Exists For $group - $member")
+      val user = directory.users.get(member.email.get)
+
+      Future{ Member(member.email, user.right.get.id, member.memberType, member.role) }
   }
 
-  private def checkIfMemberExists(group: Group, member: Member)(implicit db: JdbcProfile#Backend#Database): Future[Boolean] = {
+  private def checkIfMemberExists(group: CompleteGroup, member: Member)(implicit db: JdbcProfile#Backend#Database): Future[Option[(GoogleGroupToUserRow, GoogleGroupsRow)]] = {
 
-    val memberFilter = googleGroupToUser.withFilter(_.userEmail === member.email)
-    val groupFilter = googleGroups.withFilter(_.email === group.email)
+    val memberFilter = googleGroupToUser.filter(_.userEmail === member.email)
+    val groupFilter = googleGroups.filter(_.email === group.email)
 
     val tableJoin = memberFilter join groupFilter on (_.groupId === _.id)
-    val action = tableJoin.exists.result
+    val action = tableJoin.result.headOption
 
-    db.run(action)
+    val f = db.run(action)
+    f
   }
-
 
   private def createMembersOfGroupData(groupData: GroupData): Seq[Member] = {
     transformStudentsToMembers(groupData) ++ Seq[Member](transformProfessorToMember(groupData))
@@ -261,6 +303,37 @@ ORDER BY alias asc
     } yield Member(Some(member.studentEmail))
   }
 
+  private case class CompleteGroup(
+                                  Name: String,
+                                  Email: String,
+                                  Id: String,
+                                  Description: Option[String],
+                                  MemberCount: Long,
+                                  AdminCreated: Boolean
+                                  )
+
+  private implicit def fromCompleteGroupToGroup(completeGroup: CompleteGroup): Group = {
+    Group(
+      completeGroup.Name,
+      completeGroup.Email,
+      Some(completeGroup.Id),
+      completeGroup.Description,
+      Some(completeGroup.MemberCount),
+      None,
+      Some(completeGroup.AdminCreated)
+    )
+  }
+
+  private implicit def fromGroupToCompleteGroup(group: Group): CompleteGroup = {
+    CompleteGroup(
+      group.name,
+      group.email,
+      group.id.get,
+      group.description,
+      group.directMemberCount.get,
+      group.adminCreated.get
+    )
+  }
 
 
 
