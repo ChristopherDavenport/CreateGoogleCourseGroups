@@ -33,7 +33,7 @@
     <logger name="com.zaxxer.hikari" level="error" />
     <!-- Configure so that it outputs to both console and log file -->
     <root level="info">
-        <!--<appender-ref ref="FILE" />-->
+        <appender-ref ref="FILE" />
         <appender-ref ref="STDOUT" />
     </root>
 </configuration>

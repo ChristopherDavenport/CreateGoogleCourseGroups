@@ -475,6 +475,12 @@ ORDER BY alias asc
     transformStudentsToMembers(groupData) ++ Seq[Member](transformProfessorToMember(groupData))
   }
 
+  /**
+    * Each classGroupMembers has the professor record. So this method takes the first record and generates the
+    * professor as the group owner of that group.
+    * @param groupData A group and all its data
+    * @return The Professor as a Member
+    */
   private def transformProfessorToMember(groupData: GroupData): Member = {
     val professorEmail = groupData.classGroupMembers.head.professorEmail
     Member(
@@ -483,14 +489,35 @@ ORDER BY alias asc
     )
   }
 
-  private def transformStudentsToMembers(groupData: GroupData): Seq[Member]
-  = {
+  /**
+    * This generates a member by wrapping each group Member as a Member
+    * @param groupData A group and all its data
+    * @return A Sequence of all student members
+    */
+  private def transformStudentsToMembers(groupData: GroupData): Seq[Member] = {
     for {
       member <- groupData.classGroupMembers
     } yield Member(Some(member.studentEmail))
   }
 
-  private def checkIfMemberExists(group: CompleteGroup, member: Member)(implicit db: JdbcProfile#Backend#Database): Future[Option[(GoogleGroupToUserRow, GoogleGroupsRow)]] = {
+  /**
+    * This is where we check if the member already exists in the database. It simply checks against both the googleGroup
+    * and GoogleMembers Table for the student email and group email and then has a join on the groupID to the Id in the
+    * groups Table
+    *
+    * Note: This is a good example of a Joined Query using Slick as you can see it returns natively a * unless we map
+    * to specific rows. So In the case of a two table * we are given a tuple of the two types of Records
+    * GoogleGroupToUserRow and GoogleGroupsRow
+    *
+    * @param group A Complete Group That Is required to have an email
+    * @param member A Member which must have an email
+    * @param db The database to check against
+    * @return An Option of A Tuple of a GoogleMembersRow and a GoogleGroups Row. Will be none if nothing meets the
+    *         criteria of the query.
+    */
+  private def checkIfMemberExists(group: CompleteGroup, member: Member)
+                                 (implicit db: JdbcProfile#Backend#Database)
+  : Future[Option[(GoogleGroupToUserRow, GoogleGroupsRow)]] = {
 
     val memberFilter = googleGroupToUser.filter(_.userEmail === member.email)
     val groupFilter = googleGroups.filter(_.email === group.Email)
@@ -502,6 +529,19 @@ ORDER BY alias asc
     f
   }
 
+  /**
+    * This creates a Member if they did not exist in the database already. This strings together creating
+    * the group in Google and Creating the Group in the database and is the last function returned from the
+    * "Money" - createFromGroupData
+    * function that strings the whole program together
+    * @param group The complete Group
+    * @param member The Member To Create
+    * @param db The database to create it in
+    * @param directory The Google Directory
+    * @param ec The execution context to fork futures from
+    * @return The group, the createdMember Returned from Google, and the number of rows affected by the act of
+    *         creating the member in the database - This should be 1.
+    */
   private def createNonexistentMember(group: CompleteGroup, member: Member)
                                      (implicit db: JdbcProfile#Backend#Database,
                                       directory: Directory,
@@ -513,28 +553,19 @@ ORDER BY alias asc
 
   }
 
-  private def createMemberInDB(group: CompleteGroup, member: Member)(implicit db: JdbcProfile#Backend#Database, ec: ExecutionContext): Future[Int] = {
-    val NewMember = Try{GoogleGroupToUserRow(
-      group.Id,
-      member.id.get,
-      member.email,
-      "Y",
-      member.role,
-      member.memberType
-    )
-    }
-    if (NewMember.isFailure){
-      logger.error(s"Failed to create $group in DB")
-      Future.failed(NewMember.failed.get)
-    } else{
-      logger.debug(s"Creating or Updating - $NewMember")
-      db.run(googleGroupToUser += NewMember.get)
-    }
-
-  }
-
-
-
+  /**
+    * This creates the Member in Google. As this is near the end it is where the most things can go wrong. The complete
+    * group data type has accounted for most of these problems however it is still possible that we are trying to
+    * create a group that exists in Google but not in the database. We have accounted for that by
+    * giving it a recovery option by finding the user account and constructing an artificial Member record from the
+    * correct information. We Also have recovery for if we are hitting google too fast to artificially slow ourselves
+    * down.
+    * @param group The Group The Member is to be a part of
+    * @param member The Member To create
+    * @param directory The google directory to create these from
+    * @param ec The execution context to fork futures from
+    * @return A Member
+    */
   private def createGoogleMember(group: CompleteGroup, member: Member)(implicit directory: Directory, ec: ExecutionContext)
   : Future[Member] = Future {
     directory.members.add(group.Email, member)
@@ -549,6 +580,34 @@ ORDER BY alias asc
       Future{ Member(member.email, user.right.get.id, member.memberType, member.role) }
   }
 
-
+  /**
+    * Creating the Member in the Database. The Try is a Relic of some Errors that were happening before I
+    * created the CompleteGroup Data type. However it should still be useful in case errors pop up as its debug lets
+    * us know explicitly where errors occur to investigate why they occur.
+    * @param group A Complete Group
+    * @param member A Member
+    * @param db The Database to perform this on
+    * @param ec The execution context to fork futures into
+    * @return An Integer representing the number of rows affected. Since We only have created 1 record, this should
+    *         only ever be 1.
+    */
+  private def createMemberInDB(group: CompleteGroup, member: Member)(implicit db: JdbcProfile#Backend#Database, ec: ExecutionContext): Future[Int] = {
+    val NewMember = Try{GoogleGroupToUserRow(
+      group.Id,
+      member.id.get,
+      member.email,
+      "Y",
+      member.role,
+      member.memberType
+    )
+    }
+    if (NewMember.isFailure){
+      logger.error(s"Failed to create $group in DB")
+      Future.failed(NewMember.failed.get)
+    } else{
+      logger.debug(s"Creating - $NewMember")
+      db.run(googleGroupToUser += NewMember.get)
+    }
+  }
 
 }
