@@ -10,7 +10,7 @@
     <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
         <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
             <!-- Daily rollover -->
-            <fileNamePattern>log/RunLog.%d{yyyy-MM-dd}.log</fileNamePattern>
+            <fileNamePattern>log/CreateGoogleCourseGroupsRunLog.%d{yyyy-MM-dd}.log</fileNamePattern>
 
             <!-- Keep 7 days' worth of history -->
             <maxHistory>7</maxHistory>
@@ -34,6 +34,6 @@
     <!-- Configure so that it outputs to both console and log file -->
     <root level="info">
         <appender-ref ref="FILE" />
-        <appender-ref ref="STDOUT" />
+        <!--<appender-ref ref="STDOUT" />-->
     </root>
 </configuration>

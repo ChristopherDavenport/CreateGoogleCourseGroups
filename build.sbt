@@ -1,11 +1,14 @@
 enablePlugins(JavaAppPackaging)
 name := "CreateGoogleCourseGroups"
+version := "0.1.0"
+maintainer := "Christopher Davenport <ChristopherDavenport@outlook.com>"
+packageSummary := "This creates the groups for Eckerd College Moving Banner Courses into individual groups in Google"
 
-version := "1.0"
 
 scalaVersion := "2.11.8"
 
 resolvers += Resolver.sonatypeRepo("snapshots")
+resolvers += "Typesafe Releases" at "http://repo.typesafe.com/typesafe/maven-releases/"
 
 val slickV = "3.1.0"
 
@@ -23,6 +26,10 @@ unmanagedBase := baseDirectory.value / ".lib"
 
 mainClass in Compile := Some("edu.eckerd.scripts.google.CreateGoogleCourseGroups")
 
-mappings in Universal += {
-  sourceDirectory.value / "main" / "resources" / "application.conf" -> "conf/application.conf"
-}
+mappings in Universal ++= Seq(
+  sourceDirectory.value / "main" / "resources" / "application.conf" -> "conf/application.conf",
+  sourceDirectory.value / "main" / "resources" / "logback.xml" -> "conf/logback.xml"
+)
+
+rpmVendor := "Eckerd College"
+rpmLicense := Some("Apache 2.0")
