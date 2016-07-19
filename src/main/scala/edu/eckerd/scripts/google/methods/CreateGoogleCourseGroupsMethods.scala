@@ -91,15 +91,16 @@ trait CreateGoogleCourseGroupsMethods extends LazyLogging{
     } yield flat
   }
 
-  private case class ClassGroupMember(
+  case class ClassGroupMember(
                              courseName: String,
                              courseEmail: String,
                              studentEmail: String,
                              professorEmail: String,
+                             crn: String,
                              term: String
                              )
 
-  private case class GroupData(group: Group, classGroupMembers : Seq[ClassGroupMember])
+  case class GroupData(group: Group, classGroupMembers : Seq[ClassGroupMember])
 
   /**
     * This Class is Similar To a Group Except that rather than Options, it Contains All Required Values To Go
@@ -109,7 +110,7 @@ trait CreateGoogleCourseGroupsMethods extends LazyLogging{
     * On further advancements to the Google API perhaps this will not be necessary.
     *
     */
-  private case class CompleteGroup(
+  case class CompleteGroup(
                                     Name: String,
                                     Email: String,
                                     Id: String,
@@ -117,7 +118,7 @@ trait CreateGoogleCourseGroupsMethods extends LazyLogging{
                                     MemberCount: Long,
                                     AdminCreated: Boolean
                                   )
-  private def fromCompleteGroupToGroup(completeGroup: CompleteGroup): Group = {
+  def fromCompleteGroupToGroup(completeGroup: CompleteGroup): Group = {
     Group(
       completeGroup.Name,
       completeGroup.Email,
@@ -128,18 +129,18 @@ trait CreateGoogleCourseGroupsMethods extends LazyLogging{
       Some(completeGroup.AdminCreated)
     )
   }
-  private def fromGroupToCompleteGroup(group: Group): CompleteGroup = {
+  def fromGroupToCompleteGroup(group: Group): CompleteGroup = {
     CompleteGroup(
       group.name,
       group.email,
       group.id.get,
       group.description,
-      group.directMemberCount.get,
+      group.directMemberCount.getOrElse(0),
       group.adminCreated.get
     )
   }
 
-  private implicit val getClassGroupMemberResult = GetResult(r => ClassGroupMember(r.<<, r.<<, r.<<, r.<<, r.<<))
+  private implicit val getClassGroupMemberResult = GetResult(r => ClassGroupMember(r.<<, r.<<, r.<<, r.<<, r.<<, r.<<))
 
   /**
     * The cornerstone of this operation hinges around an effective query to return the necessary rows.
@@ -196,6 +197,7 @@ trait CreateGoogleCourseGroupsMethods extends LazyLogging{
   '-' || decode(substr(SFRSTCR_TERM_CODE, -2, 1), 1, 'fa', 2, 'sp', 3, 'su') || '@eckerd.edu') as ALIAS,
   studentemail.GOREMAL_EMAIL_ADDRESS as STUDENT_EMAIL,
   professorEmail.GOREMAL_EMAIL_ADDRESS as PROFESSOR_EMAIL,
+  SFRSTCR_CRN as CRN,
   GTVSDAX_EXTERNAL_CODE
 FROM
   SFRSTCR
@@ -252,13 +254,13 @@ ORDER BY alias asc
     * @param allMembersForCurrentTerms This is the set of information returned from the database
     * @return A group data object
     */
-  private def createGroupData(allMembersForCurrentTerms: Seq[ClassGroupMember]): Seq[GroupData] = {
+  def createGroupData(allMembersForCurrentTerms: Seq[ClassGroupMember]): Seq[GroupData] = {
     val mapOfMembersByGroup = partitionByGroup(allMembersForCurrentTerms)
 
     for {
       group <- transformToGroups(allMembersForCurrentTerms)
     } yield {
-      GroupData(group, mapOfMembersByGroup.get(group.email).get)
+      GroupData(group, mapOfMembersByGroup(group.email))
     }
   }
 
@@ -267,7 +269,7 @@ ORDER BY alias asc
     * @param allMembersForCurrentTerms The set of all records returned from the database
     * @return  A Sequence of Unique Groups
     */
-  private def transformToGroups(allMembersForCurrentTerms: Seq[ClassGroupMember]):Seq[Group] = {
+  def transformToGroups(allMembersForCurrentTerms: Seq[ClassGroupMember]):Seq[Group] = {
     val groups = for {
       member <- allMembersForCurrentTerms
     } yield Group(
@@ -285,7 +287,7 @@ ORDER BY alias asc
     * @param allMembersForCurrentTerms The set of all records returned from the database
     * @return A Map connecting courseEmail to all Members of that course.
     */
-  private def partitionByGroup(allMembersForCurrentTerms: Seq[ClassGroupMember]): Map[String, Seq[ClassGroupMember]]= {
+  def partitionByGroup(allMembersForCurrentTerms: Seq[ClassGroupMember]): Map[String, Seq[ClassGroupMember]]= {
     allMembersForCurrentTerms.groupBy(_.courseEmail)
   }
 
@@ -315,7 +317,7 @@ ORDER BY alias asc
   private def createFromGroupData(groupData: GroupData)(implicit db: JdbcProfile#Backend#Database,
                                                 directory: Directory,
                                                 ec: ExecutionContext): Future[Seq[(Group, Member, Int)]] = {
-    checkIfGroupExists(groupData.group).flatMap{
+    checkIfGroupExists(groupData).flatMap{
 
       case Some(groupOption) =>
         logger.debug(s"$groupOption exists - continuing to check members")
@@ -339,38 +341,63 @@ ORDER BY alias asc
     }
   }
 
+  def convertGroupRowToCompleteGroup(googleGroupsRow: GoogleGroupsRow): CompleteGroup = {
+    val adminCreated = true
+    CompleteGroup(
+      googleGroupsRow.name,
+      googleGroupsRow.email,
+      googleGroupsRow.id,
+      googleGroupsRow.desc,
+      googleGroupsRow.count,
+      adminCreated
+    )
+  }
+
   /**
     * This is the check function to make sure the group exists. It checks the email against the email in the
     * GOOGLE_GROUPS table and  if they match converts them ta a CompleteGroup which will be used For the Members
     * Joing
     *
-    * @param group The group to check if exists
+    * @param groupData The group to check if exists
     * @param db The database to check against
     * @param ec The execution context to perform it in
     * @return An option of a Complete Group or None
     */
-  private def checkIfGroupExists(group: Group)(implicit db: JdbcProfile#Backend#Database, ec: ExecutionContext): Future[Option[CompleteGroup]] = {
-
-    def convertGroupRowToCompleteGroup(googleGroupsRow: GoogleGroupsRow): CompleteGroup = {
-      val adminCreated = true
-      CompleteGroup(
-        googleGroupsRow.name,
-        googleGroupsRow.email,
-        googleGroupsRow.id,
-        googleGroupsRow.desc,
-        googleGroupsRow.count,
-        adminCreated
-      )
-    }
+  private def checkIfGroupExists(groupData: GroupData)(implicit db: JdbcProfile#Backend#Database, ec: ExecutionContext): Future[Option[CompleteGroup]] = {
+    val group = groupData.group
 
     val action = googleGroups.filter(g =>
       g.email === group.email
     ).result.headOption
 
-    db.run(action).map{
-      case None => None
-      case Some(groupInTable) => Some(convertGroupRowToCompleteGroup(groupInTable))
+    db.run(action).flatMap{
+      case None => Future.successful(None)
+      case Some(groupInTable) =>
+        val complete = convertGroupRowToCompleteGroup(groupInTable)
+
+        equalityCheck(groupData, groupInTable) match {
+        case true => Future.successful( Option(complete))
+        case false => createOrUpdateGroupInDB(
+          complete,
+          groupData.classGroupMembers.head.term,
+          groupData.classGroupMembers.head.crn
+        ).map(_ =>
+          Some(complete)
+        )
+      }
     }
+  }
+
+  def equalityCheck(groupData: GroupData, googleGroupsRow: GoogleGroupsRow): Boolean = {
+    val term = groupData.classGroupMembers.head.term
+    val crn = groupData.classGroupMembers.head.crn
+    val autoKeyForGroupData = term + "-" + crn
+
+    val equalEmail = groupData.group.email == googleGroupsRow.email
+    val equalAutoKey = Option(autoKeyForGroupData) == googleGroupsRow.autoKey
+    val equalAutoTerm = Option(term) == googleGroupsRow.autoTermCode
+
+    List(equalEmail, equalAutoKey, equalAutoTerm).forall(_ == true)
   }
 
   /**
@@ -391,10 +418,12 @@ ORDER BY alias asc
                             (implicit db: JdbcProfile#Backend#Database,
                              directory: Directory,
                              ec: ExecutionContext): Future[GroupData] = {
+
     val term = groupData.classGroupMembers.head.term
+    val crn = groupData.classGroupMembers.head.crn
     for {
       group <- createGoogleGroup(groupData.group)
-      intCreated <- createGroupInDB( fromGroupToCompleteGroup(group) , term)
+      intCreated <- createOrUpdateGroupInDB( fromGroupToCompleteGroup(group) , term, crn)
     } yield groupData.copy(group = group)
   }
 
@@ -429,6 +458,21 @@ ORDER BY alias asc
       }
   }
 
+  def createGoogleGroupsRow(group:CompleteGroup, term: String, crn: String): GoogleGroupsRow = {
+    GoogleGroupsRow(
+      group.Id,
+      "Y",
+      group.Name,
+      group.Email,
+      group.MemberCount,
+      group.Description,
+      None,
+      Some ("COURSE"),
+      Some (term + "-" + crn),
+      Some (term)
+    )
+  }
+
   /**
     * By using CompleteGroups we have type safety that the information is all present when it reaches this function.
     * This writes groups to the Database
@@ -446,20 +490,10 @@ ORDER BY alias asc
     * @return An integer representing the Number of Rows Affected.
     *         This result is ignored in the execution of this program
     */
-  private def createGroupInDB(group: CompleteGroup, term: String)(implicit db: JdbcProfile#Backend#Database, ec: ExecutionContext) : Future[Int] = {
+  private def createOrUpdateGroupInDB(group: CompleteGroup, term: String, crn: String)
+                             (implicit db: JdbcProfile#Backend#Database, ec: ExecutionContext) : Future[Int] = {
 
-    val NewGroup = GoogleGroupsRow(
-      group.Id,
-      "Y",
-      group.Name,
-      group.Email,
-      group.MemberCount,
-      group.Description,
-      None,
-      Some ("COURSE"),
-      Some (group.Email.replace ("@eckerd.edu", "") ),
-      Some (term)
-    )
+    val NewGroup = createGoogleGroupsRow(group, term, crn)
 
     logger.debug(s"Creating or Updating - $NewGroup")
     db.run(googleGroups.insertOrUpdate(NewGroup))
@@ -471,7 +505,7 @@ ORDER BY alias asc
     * @param groupData The groupData to build the members from
     * @return A Sequence of Members to Iterate Over
     */
-  private def createMembersOfGroupData(groupData: GroupData): Seq[Member] = {
+  def createMembersOfGroupData(groupData: GroupData): Seq[Member] = {
     transformStudentsToMembers(groupData) ++ Seq[Member](transformProfessorToMember(groupData))
   }
 
@@ -481,7 +515,7 @@ ORDER BY alias asc
     * @param groupData A group and all its data
     * @return The Professor as a Member
     */
-  private def transformProfessorToMember(groupData: GroupData): Member = {
+  def transformProfessorToMember(groupData: GroupData): Member = {
     val professorEmail = groupData.classGroupMembers.head.professorEmail
     Member(
       email = Some(professorEmail),
@@ -494,7 +528,7 @@ ORDER BY alias asc
     * @param groupData A group and all its data
     * @return A Sequence of all student members
     */
-  private def transformStudentsToMembers(groupData: GroupData): Seq[Member] = {
+  def transformStudentsToMembers(groupData: GroupData): Seq[Member] = {
     for {
       member <- groupData.classGroupMembers
     } yield Member(Some(member.studentEmail))
@@ -606,7 +640,11 @@ ORDER BY alias asc
       Future.failed(NewMember.failed.get)
     } else{
       logger.debug(s"Creating - $NewMember")
-      db.run(googleGroupToUser += NewMember.get)
+      db.run(googleGroupToUser += NewMember.get) recoverWith{
+        case uniqueConstraintViolation : java.sql.SQLIntegrityConstraintViolationException =>
+          logger.error(s"Error on - ${NewMember.get}")
+          Future.failed(uniqueConstraintViolation)
+      }
     }
   }
 
