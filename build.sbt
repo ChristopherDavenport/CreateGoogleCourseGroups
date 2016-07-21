@@ -14,7 +14,7 @@ val slickV = "3.1.0"
 
 libraryDependencies ++= List(
   "org.scalatest" %% "scalatest" % "2.2.6" % "test",
-  "edu.eckerd" %% "google-api-scala" % "0.0.1-SNAPSHOT",
+  "edu.eckerd" %% "google-api-scala" % "0.1.0",
   "com.typesafe.slick" %% "slick" % slickV,
   "com.typesafe.slick" %% "slick-extensions" % slickV ,
   "com.typesafe.slick" %% "slick-hikaricp" % slickV,
