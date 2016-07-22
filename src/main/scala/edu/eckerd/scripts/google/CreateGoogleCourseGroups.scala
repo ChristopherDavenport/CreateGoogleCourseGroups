@@ -3,16 +3,18 @@ package edu.eckerd.scripts.google
 import com.typesafe.scalalogging.LazyLogging
 import edu.eckerd.google.api.services.directory.Directory
 import edu.eckerd.scripts.google.persistence.GoogleTables
-import edu.eckerd.scripts.google.methods.CreateGoogleCourseGroupsMethods
+import edu.eckerd.scripts.google.methods.{CreateGoogleCourseGroupsMethods, DeleteMembersNoLongerInCourseMethods}
 import slick.backend.DatabaseConfig
 import slick.driver.JdbcProfile
-import concurrent.ExecutionContext.Implicits.global
-import concurrent.Await
-import concurrent.duration._
+
+import scala.concurrent.ExecutionContext.Implicits.global
+import scala.concurrent.Await
+import scala.concurrent.duration._
 /**
   * Created by davenpcm on 6/30/16.
   */
-object CreateGoogleCourseGroups extends CreateGoogleCourseGroupsMethods with GoogleTables with App with LazyLogging {
+object CreateGoogleCourseGroups extends CreateGoogleCourseGroupsMethods with DeleteMembersNoLongerInCourseMethods
+  with GoogleTables with App with LazyLogging {
   logger.info("Starting Create Google Groups Process")
   implicit val dbConfig: DatabaseConfig[JdbcProfile] = DatabaseConfig.forConfig("oracle")
   implicit val profile = dbConfig.driver
@@ -21,9 +23,14 @@ object CreateGoogleCourseGroups extends CreateGoogleCourseGroupsMethods with Goo
 
   val creating = CreateGoogleCourseGroups()
 
-  val result = Await.result(creating, Duration.Inf)
+  val result = Await.result(creating, Duration(30, MINUTES))
 
   result.filter(_._3 > 0).foreach(r => logger.info(s"$r"))
 
+  val deletingOld = DeleteAllInactiveIndividuals()
+
+  val result2 = Await.result(deletingOld, Duration(30, MINUTES))
+
+  logger.info(s"Deletion Process Removed - ${result2.sum}")
   logger.info("Exiting Create Google Groups Process Normally")
 }
