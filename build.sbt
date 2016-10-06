@@ -13,7 +13,7 @@ resolvers += "Typesafe Releases" at "http://repo.typesafe.com/typesafe/maven-rel
 val slickV = "3.1.0"
 
 libraryDependencies ++= List(
-  "org.scalatest" %% "scalatest" % "2.2.6" % "test",
+  "org.scalatest" %% "scalatest" % "3.0.0" % "test",
   "edu.eckerd" %% "google-api-scala" % "0.1.0",
   "com.typesafe.slick" %% "slick" % slickV,
   "com.typesafe.slick" %% "slick-extensions" % slickV ,
