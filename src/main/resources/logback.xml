@@ -7,17 +7,10 @@
     </appender>
 
 
-    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
-        <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
-            <!-- Daily rollover -->
-            <fileNamePattern>log/CreateGoogleCourseGroupsRunLog.%d{yyyy-MM-dd}.log</fileNamePattern>
-
-            <!-- Keep 7 days' worth of history -->
-            <maxHistory>7</maxHistory>
-        </rollingPolicy>
-
+    <appender name="FILE" class="ch.qos.logback.core.FileAppender">
+        <file>log/CreateGoogleCourseGroups.log</file>
         <encoder>
-            <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
         </encoder>
     </appender>
 
