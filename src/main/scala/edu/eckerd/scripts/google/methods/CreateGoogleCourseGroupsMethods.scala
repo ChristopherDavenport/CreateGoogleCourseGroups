@@ -324,18 +324,18 @@ ORDER BY alias asc
         Future.sequence {
           createMembersOfGroupData(groupData).map(member =>
             checkIfMemberExists(groupOption, member).flatMap {
-              case Some(memberRowGroupRowTuple) =>
-                logger.debug(s"$groupOption - $member exists - doing nothing")
-                Future.successful(( fromCompleteGroupToGroup(groupOption), member, 0))
-              case None =>
-                logger.debug(s"$groupOption - $member - does not exist - creating member")
-                createNonexistentMember(groupOption, member).map(tuple => ( fromCompleteGroupToGroup(tuple._1), tuple._2, tuple._3))
+                  case Some(memberRowGroupRowTuple) =>
+                    logger.debug(s"$groupOption - $member exists - doing nothing")
+                    Future.successful((fromCompleteGroupToGroup(groupOption), member, 0))
+                  case None =>
+                    logger.info(s"$groupOption - $member - does not exist - creating member")
+                    createNonexistentMember(groupOption, member).map(tuple => (fromCompleteGroupToGroup(tuple._1), tuple._2, tuple._3))
             }
           )
         }
 
       case None =>
-        logger.debug(s"${groupData.group} does not exist - creating group")
+        logger.info(s"${groupData.group} does not exist - creating group")
         createNonExistentGroup(groupData).flatMap(createFromGroupData)
 
     }
@@ -531,7 +531,7 @@ ORDER BY alias asc
   def transformStudentsToMembers(groupData: GroupData): Seq[Member] = {
     for {
       member <- groupData.classGroupMembers
-    } yield Member(Some(member.studentEmail))
+    } yield Member(Some(member.studentEmail), role = "MEMBER" )
   }
 
   /**
@@ -609,9 +609,8 @@ ORDER BY alias asc
       createGoogleMember(group, member)
     case alreadyExists : GoogleJsonResponseException if alreadyExists.getLocalizedMessage.contains("already exists") =>
       logger.error(s"Member Already Exists For $group - $member")
-      val user = directory.users.get(member.email.get)
-
-      Future{ Member(member.email, user.right.get.id, member.memberType, member.role) }
+      val extantMember = directory.members.list(group.Email).find(_.email.get == member.email.get)
+      extantMember.map(Future.successful).getOrElse(Future.failed(alreadyExists))
   }
 
   /**
@@ -625,26 +624,28 @@ ORDER BY alias asc
     * @return An Integer representing the number of rows affected. Since We only have created 1 record, this should
     *         only ever be 1.
     */
-  private def createMemberInDB(group: CompleteGroup, member: Member)(implicit db: JdbcProfile#Backend#Database, ec: ExecutionContext): Future[Int] = {
-    val NewMember = Try{GoogleGroupToUserRow(
-      group.Id,
+  private def createMemberInDB(group: CompleteGroup, member: Member)
+                              (implicit db: JdbcProfile#Backend#Database, ec: ExecutionContext): Future[Int] = {
+
+    val NewMember = GoogleGroupToUserRow(
+      groupId = group.Id,
       member.id.get,
       member.email,
       "Y",
       member.role,
       member.memberType
     )
-    }
-    if (NewMember.isFailure){
-      logger.error(s"Failed to create $group in DB")
-      Future.failed(NewMember.failed.get)
-    } else{
-      logger.debug(s"Creating - $NewMember")
-      db.run(googleGroupToUser += NewMember.get) recoverWith{
-        case uniqueConstraintViolation : java.sql.SQLIntegrityConstraintViolationException =>
-          logger.error(s"Error on - ${NewMember.get}")
-          Future.failed(uniqueConstraintViolation)
-      }
+    val exists = db.run(
+      googleGroupToUser.filter(row => row.groupId === group.Id && row.userID === NewMember.userID).exists.result
+    )
+    exists.flatMap {
+      case true =>
+        db.run(googleGroupToUser.filter(row => row.groupId === group.Id && row.userID === NewMember.userID).delete)
+          .flatMap( _ =>
+            db.run(googleGroupToUser += NewMember)
+          )
+      case false =>
+        db.run(googleGroupToUser += NewMember)
     }
   }
 

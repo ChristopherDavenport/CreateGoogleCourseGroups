@@ -1,12 +1,13 @@
 package edu.eckerd.scripts.google.methods
 
+import com.google.api.client.googleapis.json.GoogleJsonResponseException
 import com.typesafe.scalalogging.LazyLogging
 import edu.eckerd.google.api.services.directory.Directory
 import edu.eckerd.scripts.google.persistence.GoogleTables._
 import slick.jdbc.GetResult
 
 import scala.concurrent.{ExecutionContext, Future}
-import scala.util.Try
+import scala.util.{Failure, Success, Try}
 /**
   * Created by davenpcm on 7/22/16.
   */
@@ -25,7 +26,7 @@ trait DeleteMembersNoLongerInCourseMethods extends LazyLogging {
   def DeleteAllInactiveIndividuals()
                                   (implicit db: Database, ec: ExecutionContext): Future[Seq[Int]] = {
     val f = deleteDroppedMembersFromGoogle()
-    f.map(_._2.foreach(bad => logger.error(s"Record Failed Deletion - $bad")))
+
     f.flatMap(t => deleteNonExistentMembersFromTable(t._1))
   }
 
@@ -228,14 +229,34 @@ ORDER BY alias asc""".as[SimpleMembership]
     val deletedFromGoogle = generateDisjunction()
       .map{ _.map {
         case SimpleMembership(groupEmail, userEmail) =>
-          (SimpleMembership(groupEmail, userEmail), Try(directory.members.remove(groupEmail, userEmail)))
+          logger.info(s"Attempting to remove $userEmail from $groupEmail")
+
+          def attemptDelete(groupEmail: String, userEmail: String): Try[Unit] = Try(directory.members.remove(groupEmail, userEmail)) recoverWith{
+            case doesntExist : GoogleJsonResponseException if doesntExist.getLocalizedMessage.contains("404") =>
+              Success(())
+            case limitCap : GoogleJsonResponseException if limitCap.getLocalizedMessage.contains("exceeds") =>
+              Thread.sleep(100)
+              attemptDelete(groupEmail, userEmail)
+          }
+          val attempt = attemptDelete(groupEmail, userEmail)
+          val membership = SimpleMembership(groupEmail, userEmail)
+          attempt match {
+            case success: Success[_] =>
+              (membership, success)
+            case Failure(e) =>
+              logger.error(s"Record Failed Deletion - $membership" +
+                s"/n ${e.getLocalizedMessage}")
+              (membership, Failure(e))
+          }
+
       }
       }
 
-    val partitioned = deletedFromGoogle.map(_.partition( t => t._2.isSuccess))
+    val partitionedFuture = deletedFromGoogle.map(_.partition( t => t._2.isSuccess))
 
-    partitioned.map{
-      p => (p._1.map(_._1), p._2.map(_._1))
+
+    partitionedFuture.map{
+      partitionedSet => (partitionedSet._1.map(_._1), partitionedSet._2.map(_._1))
     }
   }
 
