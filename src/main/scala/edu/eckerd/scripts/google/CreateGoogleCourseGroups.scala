@@ -4,8 +4,8 @@ import com.typesafe.scalalogging.LazyLogging
 import edu.eckerd.google.api.services.directory.Directory
 import edu.eckerd.scripts.google.persistence.GoogleTables
 import edu.eckerd.scripts.google.methods.{CreateGoogleCourseGroupsMethods, DeleteMembersNoLongerInCourseMethods}
-import slick.backend.DatabaseConfig
-import slick.driver.JdbcProfile
+import slick.basic.DatabaseConfig
+import slick.jdbc.JdbcProfile
 
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.Await
@@ -17,19 +17,19 @@ object CreateGoogleCourseGroups extends CreateGoogleCourseGroupsMethods with Del
   with GoogleTables with App with LazyLogging {
   logger.info("Starting Create Google Groups Process")
   implicit val dbConfig: DatabaseConfig[JdbcProfile] = DatabaseConfig.forConfig("oracle")
-  implicit val profile = dbConfig.driver
+  implicit val profile = dbConfig.profile
   implicit val db = dbConfig.db
   implicit val directory = Directory()
 
   val creating = CreateGoogleCourseGroups()
 
-  val result = Await.result(creating, Duration(30, MINUTES))
+  val result = Await.result(creating, Duration(3, HOURS))
 
   result.filter(_._3 > 0).foreach(r => logger.info(s"$r"))
 
   val deletingOld = DeleteAllInactiveIndividuals()
 
-  val result2 = Await.result(deletingOld, Duration(30, MINUTES))
+  val result2 = Await.result(deletingOld, Duration(3, HOURS))
 
   logger.info(s"Deletion Process Removed - ${result2.sum}")
   logger.info("Exiting Create Google Groups Process Normally")

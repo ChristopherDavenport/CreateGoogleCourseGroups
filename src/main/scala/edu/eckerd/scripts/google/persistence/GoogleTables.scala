@@ -8,7 +8,7 @@ import edu.eckerd.google.api.services.directory.models.{Email, Name, User}
 import concurrent.Future
 
 object GoogleTables extends GoogleTables with LazyLogging{
-  val profile = com.typesafe.slick.driver.oracle.OracleDriver
+  val profile = slick.jdbc.OracleProfile
   import profile.api._
 
   def recoverFromTableCreateFail: PartialFunction[Throwable, Future[Unit]] = {
@@ -27,7 +27,7 @@ object GoogleTables extends GoogleTables with LazyLogging{
 }
 
 trait GoogleTables {
-  val profile : slick.driver.JdbcProfile
+  val profile : slick.jdbc.JdbcProfile
   import profile.api._
 
   lazy val schema = googleUsers.schema ++ googleGroups.schema ++ googleGroupToUser.schema

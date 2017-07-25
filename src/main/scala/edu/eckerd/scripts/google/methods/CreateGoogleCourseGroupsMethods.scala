@@ -5,7 +5,7 @@ import com.typesafe.scalalogging.LazyLogging
 import edu.eckerd.google.api.services.directory.Directory
 import edu.eckerd.google.api.services.directory.models.Group
 import edu.eckerd.google.api.services.directory.models.Member
-import slick.driver.JdbcProfile
+import slick.jdbc.JdbcProfile
 import edu.eckerd.scripts.google.persistence.GoogleTables.googleGroups
 import edu.eckerd.scripts.google.persistence.GoogleTables.googleGroupToUser
 import edu.eckerd.scripts.google.persistence.GoogleTables.GoogleGroupsRow
@@ -18,7 +18,7 @@ import scala.util.Try
   * Created by davenpcm on 6/30/16.
   */
 trait CreateGoogleCourseGroupsMethods extends LazyLogging{
-  val profile : slick.driver.JdbcProfile
+  val profile : JdbcProfile
   import profile.api._
 
   /**

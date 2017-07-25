@@ -12,7 +12,7 @@ import scala.util.{Failure, Success, Try}
   * Created by davenpcm on 7/22/16.
   */
 trait DeleteMembersNoLongerInCourseMethods extends LazyLogging {
-  val profile : slick.driver.JdbcProfile
+  val profile : slick.jdbc.JdbcProfile
   val directory : Directory
   import profile.api._
 
